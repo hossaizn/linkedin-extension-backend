@@ -9,11 +9,28 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware
+// Enhanced CORS middleware for extension compatibility
 app.use(cors({
-  origin: ['chrome-extension://*', 'moz-extension://*'], // Allow extension origins
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allow chrome extensions, firefox extensions, and localhost
+    if (origin.startsWith('chrome-extension://') || 
+        origin.startsWith('moz-extension://') || 
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+    
+    // Allow your extension specifically
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json({ limit: '1mb' }));
 
 // Rate limiting to prevent abuse
@@ -22,13 +39,38 @@ const limiter = rateLimit({
   max: 100, // Limit each IP to 100 requests per windowMs
   message: {
     error: 'Too many requests, please try again later.'
-  }
+  },
+  standardHeaders: true,
+  legacyHeaders: false
 });
 app.use('/api/', limiter);
 
+// ROOT ROUTE - This fixes the "Cannot GET /" error
+app.get('/', (req, res) => {
+  res.json({
+    name: 'LinkedIn Search Everywhere API',
+    status: 'running',
+    version: '1.0.0',
+    description: 'AI-powered content analysis for LinkedIn extensions',
+    endpoints: {
+      'GET /': 'API status and information',
+      'GET /health': 'Health check endpoint',
+      'POST /api/analyze-content': 'Analyze LinkedIn content and return suggestions'
+    },
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    openaiConfigured: !!process.env.OPENAI_API_KEY
+  });
 });
 
 // Main content analysis endpoint
@@ -49,7 +91,8 @@ app.post('/api/analyze-content', async (req, res) => {
     
     res.json({ 
       suggestions,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      contentLength: content.length
     });
 
   } catch (error) {
@@ -67,17 +110,19 @@ app.post('/api/analyze-content', async (req, res) => {
 
 // OpenAI integration function
 async function analyzeWithOpenAI(content) {
-  const { OpenAI } = require('openai');
-  
+  // Check if OpenAI is available
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error('OpenAI API key not configured');
+    console.warn('OpenAI API key not configured, using fallback suggestions');
+    return generateFallbackSuggestions(content);
   }
 
-  const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-  });
-
   try {
+    const { OpenAI } = require('openai');
+    
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY
+    });
+
     const response = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
@@ -189,16 +234,36 @@ function generateFallbackSuggestions(content) {
   return suggestions.slice(0, 2);
 }
 
-// Error handling middleware
+// 404 handler for undefined routes
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    message: `The endpoint ${req.originalUrl} does not exist`,
+    availableEndpoints: {
+      'GET /': 'API status and information',
+      'GET /health': 'Health check',
+      'POST /api/analyze-content': 'Analyze content'
+    }
+  });
+});
+
+// Global error handling middleware
 app.use((error, req, res, next) => {
   console.error('Server error:', error);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
+  });
 });
 
-// Start server
-app.listen(port, () => {
-  console.log(`🚀 LinkedIn Search Everywhere API running on port ${port}`);
-  console.log(`Health check: http://localhost:${port}/health`);
-});
+// For local development
+if (require.main === module) {
+  app.listen(port, () => {
+    console.log(`🚀 LinkedIn Search Everywhere API running on port ${port}`);
+    console.log(`Health check: http://localhost:${port}/health`);
+    console.log(`OpenAI configured: ${!!process.env.OPENAI_API_KEY}`);
+  });
+}
 
+// Export for Vercel
 module.exports = app;
